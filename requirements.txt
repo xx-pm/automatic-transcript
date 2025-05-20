@@ -1,0 +1,5 @@
+python-dotenv
+openai
+pydub
+reportlab
+PyQt5

@@ -4,3 +4,6 @@ frames
 video.mov
 audio.mp3
 storyboard.pdf
+dist
+.eggs
+build
