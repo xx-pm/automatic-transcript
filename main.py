@@ -1,205 +1,74 @@
 """
-main.py – macOS GUI wrapper for core.storyboard
-Run: python main.py
+main.py – Command-line interface for core.storyboard
+Run: python main.py --video <path_to_video> --fps <frames_per_second> --output <output_path.docx>
 """
 
 import sys
 import subprocess
-import threading
-import tempfile
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog,
-    QSpinBox, QHBoxLayout, QProgressBar, QMessageBox
-)
 
 # Load environment variables
 load_dotenv()
 
-class StoryboardApp(QWidget):
-    # Define signals at class level
-    notify_success = pyqtSignal(str)
-    notify_error = pyqtSignal(str)
+def generate_storyboard_cli(video_path: Path, fps: int, output_path: Path, debug: bool = False):
+    """Calls the core.storyboard script to generate the storyboard."""
+    if not video_path.exists():
+        print(f"Error: Video file not found at {video_path}")
+        return
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Storyboard Generator")
-        self.resize(600, 400)
+    cmd = [
+        sys.executable, '-m', 'core.storyboard',
+        '--video', str(video_path),
+        '--fps', str(fps),
+        '--output', str(output_path)
+    ]
+    if debug:
+        cmd.append('--debug')
 
-        self.video_path: Path | None = None
-        self.pdf_path: Path | None = None
-        self.output_path: Path | None = None
-        self.thumb_path: Path | None = None
+    try:
+        print(f"Generating storyboard for {video_path}...")
+        print(f"Output will be saved to {output_path}")
+        subprocess.check_call(cmd)
+        print("Storyboard generated successfully!")
+        # Attempt to open the generated file (optional)
+        try:
+            if sys.platform == "win32":
+                subprocess.run(['start', str(output_path)], shell=True, check=False)
+            elif sys.platform == "darwin": # macOS
+                subprocess.run(['open', str(output_path)], check=False)
+            else: # linux variants
+                subprocess.run(['xdg-open', str(output_path)], check=False)
+        except Exception as e:
+            print(f"Could not automatically open the file: {e}")
 
-        layout = QVBoxLayout(self)
-
-        # Video selection and thumbnail
-        self.thumb_label = QLabel("⬇️  Drag & drop a video or press ‘Select’.")
-        self.thumb_label.setAlignment(Qt.AlignCenter)
-        self.thumb_label.setFixedHeight(200)
-        self.thumb_label.setAcceptDrops(True)
-        layout.addWidget(self.thumb_label)
-
-        btn_layout = QHBoxLayout()
-        self.select_btn = QPushButton("Select Video")
-        self.select_btn.clicked.connect(self.select_video)
-        btn_layout.addWidget(self.select_btn)
-
-        self.clear_btn = QPushButton("X")
-        self.clear_btn.setEnabled(False)
-        self.clear_btn.clicked.connect(self.clear_video)
-        btn_layout.addWidget(self.clear_btn)
-        layout.addLayout(btn_layout)
-
-        # Save As button
-        self.saveas_btn = QPushButton("Save As…")
-        self.saveas_btn.clicked.connect(self.choose_output)
-        self.saveas_btn.setEnabled(False)
-        layout.addWidget(self.saveas_btn)
-
-        # Frame rate selector
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("Seconds between frames:"))
-        self.spin_fps = QSpinBox()
-        self.spin_fps.setRange(1, 30)
-        self.spin_fps.setValue(1)
-        hbox.addWidget(self.spin_fps)
-        layout.addLayout(hbox)
-
-        # Progress bar
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.hide()
-        layout.addWidget(self.progress)
-
-        # Action buttons
-        self.generate_btn = QPushButton("Generate Storyboard PDF")
-        self.generate_btn.clicked.connect(self.generate_storyboard)
-        self.generate_btn.setEnabled(False)
-        layout.addWidget(self.generate_btn)
-
-        self.open_btn = QPushButton("Open PDF")
-        self.open_btn.clicked.connect(self.open_pdf)
-        self.open_btn.setEnabled(False)
-        layout.addWidget(self.open_btn)
-
-        # Info button
-        self.info_btn = QPushButton("Info")
-        self.info_btn.clicked.connect(self.show_info)
-        layout.addWidget(self.info_btn)
-
-        # Connect signals
-        self.notify_success.connect(self._on_success)
-        self.notify_error.connect(self._on_error)
-
-    # ─── drag & drop events ─────────────────────────────────────────────
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        url = e.mimeData().urls()[0]
-        self.set_video(Path(url.toLocalFile()))
-
-    # ─── file selection ──────────────────────────────────────────
-    def select_video(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select video", "", "Video (*.mp4 *.mov *.mkv)"
-        )
-        if path:
-            self.set_video(Path(path))
-
-    def clear_video(self):
-        self.video_path = None
-        self.thumb_path = None
-        self.thumb_label.clear()
-        self.thumb_label.setText("⬇️  Drag & drop a video or press ‘Select’.")
-        self.clear_btn.setEnabled(False)
-        self.saveas_btn.setEnabled(False)
-        self.generate_btn.setEnabled(False)
-
-    def choose_output(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save PDF As", self.video_path.with_suffix('.storyboard.pdf'), "PDF Files (*.pdf)"
-        )
-        if path:
-            self.output_path = Path(path)
-            self.open_btn.setEnabled(False)
-
-    def set_video(self, path: Path):
-        self.video_path = path
-        # extract first frame as thumbnail
-        tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-        thumb = tmp.name
-        tmp.close()
-        cmd = [
-            'ffmpeg', '-y', '-i', str(path), '-vf', 'select=eq(n\\,0)', '-q:v', '2', thumb
-        ]
-        subprocess.run(cmd, capture_output=True)
-        pix = QPixmap(thumb).scaled(self.thumb_label.size(), Qt.KeepAspectRatio)
-        self.thumb_label.setPixmap(pix)
-        self.thumb_path = Path(thumb)
-        self.clear_btn.setEnabled(True)
-        self.saveas_btn.setEnabled(True)
-        self.generate_btn.setEnabled(True)
-
-    # ─── storyboard generation ──────────────────────────────────
-    def generate_storyboard(self):
-        if not self.video_path:
-            return
-        self.progress.show()
-        self.generate_btn.setEnabled(False)
-        self.open_btn.setEnabled(False)
-
-        def task():
-            try:
-                fps = self.spin_fps.value()
-                out_pdf = self.output_path or self.video_path.with_suffix('.storyboard.pdf')
-                cmd = [
-                    sys.executable, '-m', 'core.storyboard',
-                    '--video', str(self.video_path),
-                    '--fps', str(fps),
-                    '--output', str(out_pdf),
-                    '--debug'
-                ]
-                subprocess.check_call(cmd)
-                self.pdf_path = out_pdf
-                self.notify_success.emit(str(out_pdf))
-            except subprocess.CalledProcessError as e:
-                self.notify_error.emit(str(e))
-            finally:
-                # UI updates on main thread
-                self.progress.hide()
-                self.generate_btn.setEnabled(True)
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ─── open generated PDF ───────────────────────────────────
-    def open_pdf(self):
-        if self.pdf_path and self.pdf_path.exists():
-            subprocess.run(['open', str(self.pdf_path)])
-
-    # ─── info dialog ─────────────────────────────────────────
-    def show_info(self):
-        QMessageBox.information(
-            self, 'About',
-            'StoryboardGen\nby Philipp Michalik\n\nMIT License\nv0.0.1'
-        )
-
-    # ─── signal handlers ───────────────────────────────────────
-    def _on_success(self, msg: str):
-        QMessageBox.information(self, 'Success', f'Storyboard saved to:\n{msg}')
-        self.open_btn.setEnabled(True)
-
-    def _on_error(self, msg: str):
-        QMessageBox.critical(self, 'Error', msg)
-
+    except subprocess.CalledProcessError as e:
+        print(f"Error generating storyboard: {e}")
+    except FileNotFoundError:
+        print("Error: python-docx or other dependency for core.storyboard might be missing.")
+        print("Please ensure all requirements from requirements.txt are installed.")
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    win = StoryboardApp()
-    win.show()
-    sys.exit(app.exec_())
+    parser = argparse.ArgumentParser(description="Generate a storyboard (transcript table in Word format) from a video file.")
+    parser.add_argument("--video", type=Path, required=True, help="Path to the video file.")
+    parser.add_argument(
+        "--fps", 
+        type=float, 
+        default=1.0, 
+        help="Interval in seconds between frame captures (e.g., 1.0 for 1 frame per second, 0.5 for 2 frames per second, 2.0 for 1 frame every 2 seconds)."
+    )
+    parser.add_argument("--output", type=Path, help="Path to save the output Word document. Defaults to <video_name>.storyboard.docx")
+    parser.add_argument("--debug", action='store_true', help="Enable debug mode for core.storyboard.")
+
+    args = parser.parse_args()
+
+    output_file = args.output
+    if not output_file:
+        output_file = args.video.with_name(f"{args.video.stem}_storyboard.docx")
+    else:
+        # Ensure the output has a .docx extension if a custom path is provided
+        if output_file.suffix.lower() != '.docx':
+            output_file = output_file.with_suffix('.docx')
+
+    generate_storyboard_cli(args.video, args.fps, output_file, args.debug)
